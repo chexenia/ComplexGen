@@ -38,3 +38,11 @@
 GeometricRefine/build/
 GeometricRefine/Bin/
 GeometricRefine/Lib/
+
+*.pyc
+*.cuh
+*/build/*
+*.egg-info
+experiments/*
+
+*.egg
