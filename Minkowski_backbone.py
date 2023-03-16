@@ -1,23 +1,35 @@
 import os
-from pickle import decode_long
-from random import sample
 import sys
 import argparse
 import time
 from datetime import datetime
 import math
 from tkinter import E
-import numpy
 from chamferdist import knn_points
 from chamferdist import knn_gather
 from chamferdist import list_to_padded
-from numpy.random.mtrand import f
 import trimesh
+from pathlib import Path
+import MinkowskiEngine as ME
+import torch.nn as nn
+import math
+import torch.nn.functional as F
+import torch.multiprocessing as mp
+import torch.distributed as dist
+import tensorflow as tf
+import plywrite
 
-from numpy.core.defchararray import _join_dispatcher
-from torch.utils.tensorboard import SummaryWriter
+from transformer3d import build_transformer_tripath
+from matcher_corner import build_matcher_corner
+from matcher_curve import build_matcher_curve, cyclic_curve_points
+from matcher_patch import build_matcher_patch, emd_by_id
+from data_loader_abc import *
 
 
+
+data_small_folder = Path("/bigdata/scan2cad/complexgen/data/train_small")
+data_root = Path("/bigdata/scan2cad/complexgen/data")
+  
 if(os.path.exists("/blob")):
   #for Philly training
   running_onCluster = True
@@ -100,6 +112,7 @@ def get_args_parser():
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--evalfinal', action='store_true')
     parser.add_argument('--evaltopo', action='store_true')
+    parser.add_argument('--testnogt', action='store_true')
     parser.add_argument('--fittingonce', action='store_true')
     parser.add_argument('--dropout', default=0.0, type=float,
                         help="Dropout applied in the transformer")
@@ -174,7 +187,7 @@ def get_args_parser():
     parser.add_argument("--vis_inter_layer", default=-1, type=int)
     # * Matcher
     parser.add_argument("--using_prob_in_matching", action='store_true', help = 'using -p in matching cost')
-
+    parser.add_argument("--data_root", type=Path, help="Path to a folder containing the dataset for nogt testing")
 
     '''
     parser.add_argument('--set_cost_class', default=1, type=float,
@@ -189,39 +202,22 @@ def get_args_parser():
 
 parser = argparse.ArgumentParser('DETR training and evaluation script', parents=[get_args_parser()])
 args = parser.parse_args()
+
 m = args.m
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 num_of_gpus = len(args.gpu.split(","))
 print("Utilize {} gpus".format(num_of_gpus))
 
-from data_loader_abc import *
-import MinkowskiEngine as ME
+voxel_dim = args.input_voxel_dim
+out_voxel_dim = voxel_dim // 8 #16
+
+if args.eval_param:
+  from src.primitives import ComputePrimitiveDistance
 if not args.no_instance_norm: #false
   print("using instance norm")
   import mink_resnet_in as resnets
 else:
   import mink_resnet as resnets
-import torch.nn as nn
-import math
-import torch.nn.functional as F
-
-from transformer3d import build_transformer_tripath
-from matcher_corner import build_matcher_corner
-from matcher_curve import build_matcher_curve, cyclic_curve_points
-from matcher_patch import build_matcher_patch, emd_by_id
-
-import torch.multiprocessing as mp
-
-voxel_dim = args.input_voxel_dim
-out_voxel_dim = voxel_dim // 8 #16
-
-import torch.distributed as dist
-import tensorflow as tf
-
-import plywrite
-
-if args.eval_param:
-  from src.primitives import ComputePrimitiveDistance
 
 points_per_curve = 34
 points_per_patch_dim = args.points_per_patch_dim #10*10 points per patch
@@ -4081,13 +4077,12 @@ def eval_pipeline(flag_eval = True):
   np.random.seed(seed)
   random.seed(seed)
   '''
-  
   if args.quicktest:
-    train_data = train_data_loader(args.batch_size, voxel_dim=voxel_dim, feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals,  data_folder="data/train_small",  with_distribute_sampler=False, flag_quick_test=args.quicktest, flag_noise=args.noise, flag_grid = args.patch_grid, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.eval_res_cov)
+    train_data = train_data_loader(args.batch_size, voxel_dim=voxel_dim, feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals,  data_folder=data_small_folder,  with_distribute_sampler=False, flag_quick_test=args.quicktest, flag_noise=args.noise, flag_grid = args.patch_grid, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.eval_res_cov)
   else:
     if args.parsenet:
-      vis_test_folder = "data/vis_test"
-      base_folder = "data"
+      vis_test_folder = os.path.join(data_root, "vis_test")
+      base_folder = data_root
       test_folder = os.path.join(base_folder, "default/test")
 
       if args.partial:
@@ -4191,22 +4186,22 @@ def pipeline_abc(rank, world_size):
 
   if True:
     if args.quicktest:
-      train_data, distribute_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder="data/train_small", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, random_angle = args.random_angle, with_normal=args.input_normal_signals, flag_quick_test=args.quicktest,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer) #
+      train_data, distribute_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder=data_small_folder, feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, random_angle = args.random_angle, with_normal=args.input_normal_signals, flag_quick_test=args.quicktest,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer) #
 
-      val_data, val_data_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder="data/train_small", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals, flag_quick_test=False, flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer)
+      val_data, val_data_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder=data_small_folder, feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals, flag_quick_test=False, flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer)
     else:
       if args.parsenet:
         if not args.partial:
-          train_data, distribute_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder="data/default/train", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment,random_angle = args.random_angle, with_normal=args.input_normal_signals, flag_quick_test=args.quicktest,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer) #
+          train_data, distribute_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder=data_root / "default/train", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment,random_angle = args.random_angle, with_normal=args.input_normal_signals, flag_quick_test=args.quicktest,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer) #
         else:
-          train_data, distribute_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder="data/partial/train", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment,random_angle = args.random_angle, with_normal=args.input_normal_signals, flag_quick_test=args.quicktest,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer) #
+          train_data, distribute_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder=data_root / "partial/train", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment,random_angle = args.random_angle, with_normal=args.input_normal_signals, flag_quick_test=args.quicktest,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer) #
       if not args.patch_grid:
         val_data, val_data_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder="val_new_64", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals, flag_quick_test=False,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer)
       else:
         if not args.partial:
-          val_data, val_data_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder="data/default/val", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals, flag_quick_test=False,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer)
+          val_data, val_data_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder=data_root / "default/val", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals, flag_quick_test=False,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer)
         else:
-          val_data, val_data_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder="data/partial/val", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals, flag_quick_test=False,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer)
+          val_data, val_data_sampler = train_data_loader(args.batch_size, voxel_dim=voxel_dim, data_folder=data_root / "partial/val", feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals, flag_quick_test=False,flag_noise=args.noise, flag_grid = args.patch_grid, num_angle = args.num_angles, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.extra_single_chamfer)
 
   
   torch.cuda.set_device(rank)
@@ -4575,9 +4570,260 @@ def pipeline_abc(rank, world_size):
           summary_writer.add_summary(tf.compat.v1.Summary(value=test_summary), train_iter)
           summary_writer.flush()
 
+def model_evaluation_nogt(model_shape, data, device, train_iter, flag_output = True, test_folder = 'test_obj'):
+  disable_aux_loss_output = True
+  model_shape.eval()
+  assert(args.batch_size == 1)
+  data_loader_iterator = iter(data)
+  
+  obj_dir = os.path.join("experiments", args.experiment_name, test_folder)
+  os.makedirs(obj_dir, exist_ok=True)
+  
+  test_statistics = []
+  sample_name_list = []
+  
+  sample_count = 0
+  dict_sum = {}
+  summary_loss_dict = {}
+
+  while(True):
+    try:
+      data_item = next(data_loader_iterator)
+    except StopIteration:
+      print('End of test set')
+      break
+    sample_count+=1
+    assert args.batch_size == 1
+    locations = data_item[0].to(device)
+    features = data_item[1].to(device)
+    input_pointcloud = data_item[2][0]    
+    sid = data_item[3][0]
+    sample_id = sid
+    print (f'sid {sid}, sample_id: {sample_id}, locations: {locations.shape}, features: {features.shape}, input_pointcloud: {input_pointcloud.shape}')
+      
+    #forward
+    sparse_locations, corner_predictions, curve_predictions, patch_predictions = model_shape(locations, features)#sparse locations not used here
+    
+    #curves
+    labels = torch.argmax(curve_predictions['pred_curve_logits'].softmax(-1)[0], dim=-1).cpu().numpy()
+    
+    pred_curve_type = curve_type_list[torch.argmax(curve_predictions['pred_curve_type'].softmax(-1)[0], dim=-1).cpu().numpy().astype(np.int32)[np.where(labels == 0)]].tolist()
+    if flag_output:
+      opath = os.path.join(obj_dir, "{}_pred_curves_type.txt".format(sample_id))
+      print('saving', opath)          
+      with open(opath, "w") as f:
+          f.write("{} \n".format(len(pred_curve_type)))
+          for item in pred_curve_type: f.write("{}\n".format(item))
+          f.write("==============================\n")
+      np.savetxt(os.path.join(obj_dir, "{}_0_input.xyz".format(sample_id)), input_pointcloud)
+    
+    if args.noise or args.partial:
+      plywrite.write_ply(os.path.join(obj_dir, "{}_0_input.ply".format(sample_id)), input_pointcloud)
+    
+    curve_points = curve_predictions['pred_curve_points'][0].detach().cpu().numpy()
+    effective_curve_points = np.reshape(curve_points[np.where(labels == 0)], [-1,3])
+    print(curve_points.shape, effective_curve_points.shape)
+    if flag_output:
+      curve_color = []
+      for item in pred_curve_type:
+        curve_color.append(np.expand_dims(curve_colormap[item], 0))
+      if len(curve_color) > 0:
+        curve_color = np.concatenate(curve_color, 0)
+        curve_color = np.tile(curve_color, points_per_curve).reshape([-1,3])
+        assert(curve_color.shape == effective_curve_points.shape)
+        plywrite.save_vert_color_ply(effective_curve_points, curve_color, os.path.join(obj_dir, "{}_4_pred_curves.ply".format(sample_id)))
+    
+    empty_curve_points = np.reshape(curve_points[np.where(labels == 1)], [-1,3])
+   
+    #corners
+    labels = torch.argmax(corner_predictions['pred_logits'].softmax(-1)[0], dim=-1).cpu().numpy()
+    corner_position = corner_predictions['pred_corner_position'][0].detach().cpu().numpy()
+    effective_corner_position = corner_position[np.where(labels == 0)]
+    if flag_output:
+      np.savetxt(os.path.join(obj_dir, "{}_2_pred_corner.xyz".format(sample_id)), effective_corner_position)
+    
+    empty_corner_position = corner_position[np.where(labels == 1)]
+    
+    #patches
+    patch_labels = torch.argmax(patch_predictions['pred_patch_logits'].softmax(-1)[0], dim=-1).cpu().numpy()
+    patch_points = patch_predictions['pred_patch_points'][0].detach().cpu().numpy() #in shape [100, 100*100, 3]
+    effective_patch_points = patch_points[np.where(patch_labels == 0)]
+    if flag_output:
+     export_patches_off(effective_patch_points, os.path.join(obj_dir, "{}_5_pred_patches.off".format(sample_id)))
+    
+    pred_patch_type = patch_type_list[torch.argmax(patch_predictions['pred_patch_type'].softmax(-1)[0], dim=-1).cpu().numpy().astype(np.int32)[np.where(patch_labels == 0)]].tolist()
+    if flag_output:
+      with open(os.path.join(obj_dir, "{}_pred_patches_type.txt".format(sample_id)), "w") as f:
+        f.write("{}\n".format(len(pred_patch_type)))
+        for item in pred_patch_type: f.write("{}\n".format(item))
+        f.write("==============================\n")
+        
+        if flag_output_patch:
+          patch_color = []
+          for item in pred_patch_type:
+            patch_color.append(np.expand_dims(patch_colormap[item],0))
+          
+          if len(patch_color) > 0:
+            patch_color = np.concatenate(patch_color, 0)
+            patch_color = np.tile(patch_color, points_per_patch_dim * points_per_patch_dim).reshape([-1,3])
+            plywrite.save_vert_color_ply(effective_patch_points.reshape(-1,3), patch_color, os.path.join(obj_dir, "{}_7_pred_patchtype.ply".format(sample_id)))
+          else:
+            print('no pred patches')
+
+    if args.eval_res_cov:
+      patch_close_logits = patch_predictions['closed_patch_logits'][0].detach().cpu().numpy()
+      patch_close_logits = patch_close_logits[np.where(patch_labels == 0)]
+      patch_uclosed = patch_close_logits[:,0] < patch_close_logits[:,1]
+      
+      if not args.eval_param:
+        distances = compute_overall_singlecd(effective_patch_points, patch_uclosed, input_pointcloud)
+      else:
+        distances = compute_overall_singlecd_param(patch_predictions, input_pointcloud)
+      
+      summary_loss_dict["overall_single_cd"] = distances.mean()
+      summary_loss_dict['p_cov_1'] = (distances < 0.01).sum() / input_pointcloud.shape[0]
+      summary_loss_dict['p_cov_2'] = (distances < 0.02).sum() / input_pointcloud.shape[0]
+      
+      print('distance mean: {:06f} max: {:06f} min: {:06f} diff: {:06f} std:{:06f}'.format(distances.mean(), distances.max(), distances.min(), distances.max() - distances.min(), np.std(distances)))
+      red_color = np.array([255, 0,0])
+      white_color = np.array([255,255,255])
+      th_dist = 0.01
+      distances[distances<th_dist] = 0.0
+      distances[distances>th_dist] = th_dist
+      distances = distances.reshape([-1,1]) / th_dist
+      pcolor = (1.0 - distances) * white_color + distances * red_color
+      if not args.no_output:
+        plywrite.save_vert_color_ply(input_pointcloud[:,:3], pcolor, os.path.join(obj_dir, "{}_pc_vis.ply".format(sample_id)))
+        plywrite.save_vert_color_ply(closest_points, pcolor, os.path.join(obj_dir, "{}_closest_vis.ply".format(sample_id)))
+        mesh.export(os.path.join(obj_dir, "{}_allpatch.obj".format(sample_id)))
+    
+    filename = os.path.join(obj_dir, "{}_prediction.pkl".format(sample_id))
+    # output_prediction(filename, corner_predictions, curve_predictions, patch_predictions, \
+    #   target_corner_points_list, target_curves_list, target_patches_list, corner_matching_indices, curve_matching_indices, patch_matching_indices, sample_id=sample_id)
+
+    for k in summary_loss_dict:
+      if k in dict_sum:
+        dict_sum[k] += summary_loss_dict[k]
+      else:
+        dict_sum[k] = summary_loss_dict[k] + 0.0
+
+    now = datetime.now()
+    print("{} sample:{}".format(now, sample_id))
+    
+    sample_name_list.append(sample_id)
+    test_statistics.append(list(summary_loss_dict.values()))
+    
+  for k in dict_sum:
+    dict_sum[k] = dict_sum[k] / sample_count
+
+  sample_name_list.append("mean")
+  test_statistics.append(list(dict_sum.values()))
+
+  np.savetxt(os.path.join(obj_dir, "test_statistics.txt"), np.array(test_statistics))
+  with open(os.path.join(obj_dir, "test_sample_name.txt"), "w") as wf:
+    for sample_name in sample_name_list:
+      wf.write("{}\n".format(sample_name))
+  print(sample_count, "samples in test set")
+  
+  import pandas as pd
+  ## convert your array into a dataframe
+  df = pd.DataFrame(np.array(test_statistics))
+  df.columns = list(summary_loss_dict.keys())
+  df.index = sample_name_list
+  filepath = os.path.join(obj_dir, 'test_statistics.xlsx')
+  df.to_excel(filepath, index=True)
+
+
+def test_nogt():
+  from data_loader_nogt import test_data_loader_nogt
+  print('test_nogt')
+  print(f'loading data from {args.data_root}')
+  data_folder = args.data_root
+  data = test_data_loader_nogt(args.batch_size, voxel_dim=voxel_dim, feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, rotation_augmentation=args.rotation_augment, with_normal=args.input_normal_signals,  data_folder=data_folder,  with_distribute_sampler=False, flag_quick_test=args.quicktest, flag_noise=args.noise, flag_grid = args.patch_grid, flag_patch_uv=args.patch_uv, dim_grid = points_per_patch_dim, eval_res_cov = args.eval_res_cov)
+      
+  device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+  disable_aux_loss_output = True
+  tf.compat.v1.disable_eager_execution()
+  backbone = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(Sparse_Backbone_Minkowski())
+  ############# voxel_pos to position encoding #############
+  position_encoding = PositionEmbeddingSine3D(out_voxel_dim, m*2, normalize=True)
+  
+  ############# build transformer #############
+  tripath_transformer = build_transformer_tripath(args)
+  
+  model_without_ddp = DETR_Shape_Tripath(backbone, position_encoding, tripath_transformer, args.num_corner_queries, args.num_curve_queries, args.num_patch_queries, aux_loss=False, device = device).to(device) #queries equals to 100, no aux loss
+  param_dicts = [{"params": [p for n, p in model_without_ddp.named_parameters() if p.requires_grad]}]
+  
+  corner_topo_params = {n:p for n, p in model_without_ddp.named_parameters() if p.requires_grad and 'corner_model.corner_topo_embed' in n}
+  corner_geometry_params = {n:p for n, p in model_without_ddp.named_parameters() if p.requires_grad and 'corner_model.corner_position_embed' in n}
+  
+  optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+  lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+  
+  log_dir, obj_dir, checkpoint_dir = prepare_experiment_folders(args.experiment_name)
+  if(os.path.exists("default.mtl") and not os.path.exists(os.path.join(obj_dir, "default.mtl"))):
+    os.system("cp default.mtl {}".format(obj_dir))
+
+  experiment_dir = os.path.join("experiments", args.experiment_name)
+
+  test_folder = 'test_obj'
+  if args.evalrest:
+    test_folder = 'test_obj_rest'
+  if args.vis_train:
+    test_folder = 'vis_train'
+  elif args.vis_test:
+    test_folder = 'vis_test'
+  elif args.eval_train:
+    test_folder = 'train_obj'
+
+  if args.vis_inter_layer != -1:
+    test_folder = test_folder + '_vislayer{}'.format(args.vis_inter_layer)
+
+  testobj_dir = os.path.join(experiment_dir, test_folder)
+  if(not os.path.exists(testobj_dir)): os.mkdir(testobj_dir)
+  if(os.path.exists("default.mtl") and not os.path.exists(os.path.join(testobj_dir, "default.mtl"))):
+    os.system("cp default.mtl {}".format(testobj_dir))
+  
+  start_iterations = 0
+  print("Try to restore from checkpoint")
+  if(args.checkpoint_path is not None):
+    if(os.path.exists(args.checkpoint_path)):
+      print("resume training using {}".format(args.checkpoint_path))
+      checkpoint = torch.load(args.checkpoint_path, map_location='cpu')
+      model_without_ddp.load_state_dict(checkpoint['model'])
+      optimizer.load_state_dict(checkpoint['optimizer'])
+      lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+      start_iterations = checkpoint['epoch'] + 1
+    else:
+      print("specified checkpoint file cannot be found: {}".format(args.checkpoint_path))
+  elif(args.enable_automatic_restore):
+    print("trying to restore automatically")
+    all_ckpt = os.listdir(checkpoint_dir)
+    restore_ckpt = None
+    restore_ckpt_epoches = -1
+    for ckpt_file in all_ckpt:
+      if(ckpt_file.endswith(".pth")):
+        ckpt_epoches = int(ckpt_file.split('_')[1].split(".")[0])
+        if(ckpt_epoches > restore_ckpt_epoches):
+          restore_ckpt_epoches = ckpt_epoches
+          restore_ckpt = os.path.join(checkpoint_dir, ckpt_file)
+    if(restore_ckpt is not None):
+      print("find available ckpt file:", restore_ckpt)
+      checkpoint = torch.load(restore_ckpt, map_location='cpu')
+      model_without_ddp.load_state_dict(checkpoint['model'])
+      optimizer.load_state_dict(checkpoint['optimizer'])
+      lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+      start_iterations = checkpoint['epoch'] + 1
+    else:
+      print("cannot find available ckpt file")
+  
+  return model_evaluation_nogt(model_without_ddp, data, device, start_iterations, flag_output = True, test_folder = test_folder)
+
 if __name__ == '__main__':
   if args.evalfinal or args.evaltopo or args.eval:
     eval_pipeline()
+  elif args.testnogt:
+    test_nogt()    
   else:
     mp.spawn(pipeline_abc,
           args=(num_of_gpus,),

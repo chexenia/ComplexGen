@@ -1,0 +1,1 @@
+python Minkowski_backbone.py --data_root /bigdata/scan2cad/realcad/3ds --experiment_name nogt --enable_automatic_restore --no_pe --hn_scale --input_normal_signals --patch_grid --ourresnet --no_output --parsenet --patch_close --patch_emd --patch_uv --gpu 0 --testnogt --vis_test
