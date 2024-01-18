@@ -6,7 +6,7 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from torch import nn, Tensor
 from typing import List
-from chamferdist import knn_points
+from pytorch3d.ops.knn import knn_points
 
 TList = List[Tensor]
 def chamfer_distance_patch(src_points, tgt_points, single_dir_patch_chamfer: bool, flag_batch_cd : bool):

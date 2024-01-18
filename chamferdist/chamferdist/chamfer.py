@@ -16,66 +16,6 @@ from torch.autograd.function import once_differentiable
 
 _KNN = namedtuple("KNN", "dists idx knn")
 
-def list_to_padded(
-    x: Union[List[torch.Tensor], Tuple[torch.Tensor]],
-    pad_size: Union[Sequence[int], None] = None,
-    pad_value: float = 0.0,
-    equisized: bool = False,
-) -> torch.Tensor:
-    r"""
-    Transforms a list of N tensors each of shape (Si_0, Si_1, ... Si_D)
-    into:
-    - a single tensor of shape (N, pad_size(0), pad_size(1), ..., pad_size(D))
-      if pad_size is provided
-    - or a tensor of shape (N, max(Si_0), max(Si_1), ..., max(Si_D)) if pad_size is None.
-    Args:
-      x: list of Tensors
-      pad_size: list(int) specifying the size of the padded tensor.
-        If `None` (default), the largest size of each dimension
-        is set as the `pad_size`.
-      pad_value: float value to be used to fill the padded tensor
-      equisized: bool indicating whether the items in x are of equal size
-        (sometimes this is known and if provided saves computation)
-    Returns:
-      x_padded: tensor consisting of padded input tensors stored
-        over the newly allocated memory.
-    """
-    if equisized:
-        return torch.stack(x, 0)
-
-    if not all(torch.is_tensor(y) for y in x):
-        raise ValueError("All items have to be instances of a torch.Tensor.")
-
-    # we set the common number of dimensions to the maximum
-    # of the dimensionalities of the tensors in the list
-    element_ndim = max(y.ndim for y in x)
-
-    # replace empty 1D tensors with empty tensors with a correct number of dimensions
-    x = [
-        # pyre-fixme[16]: `Tensor` has no attribute `new_zeros`.
-        (y.new_zeros([0] * element_ndim) if (y.ndim == 1 and y.nelement() == 0) else y)
-        for y in x
-    ]
-
-    if any(y.ndim != x[0].ndim for y in x):
-        raise ValueError("All items have to have the same number of dimensions!")
-
-    if pad_size is None:
-        pad_dims = [
-            max(y.shape[dim] for y in x if len(y) > 0) for dim in range(x[0].ndim)
-        ]
-    else:
-        if any(len(pad_size) != y.ndim for y in x):
-            raise ValueError("Pad size must contain target size for all dimensions.")
-        pad_dims = pad_size
-
-    N = len(x)
-    x_padded = x[0].new_full((N, *pad_dims), pad_value)
-    for i, y in enumerate(x):
-        if len(y) > 0:
-            slices = (i, *(slice(0, y.shape[dim]) for dim in range(y.ndim)))
-            x_padded[slices] = y
-    return x_padded
 
 class ChamferDistance(torch.nn.Module):
     def __init__(self):

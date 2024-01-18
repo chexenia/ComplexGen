@@ -5,9 +5,8 @@ import time
 from datetime import datetime
 import math
 from tkinter import E
-from chamferdist import knn_points
-from chamferdist import knn_gather
-from chamferdist import list_to_padded
+from pytorch3d.ops.knn import knn_gather, knn_points
+from utils import list_to_padded
 import trimesh
 from pathlib import Path
 import MinkowskiEngine as ME
@@ -16,9 +15,8 @@ import math
 import torch.nn.functional as F
 import torch.multiprocessing as mp
 import torch.distributed as dist
-import tensorflow as tf
 import plywrite
-
+from torch.utils.tensorboard import SummaryWriter
 from transformer3d import build_transformer_tripath
 from matcher_corner import build_matcher_corner
 from matcher_curve import build_matcher_curve, cyclic_curve_points
@@ -27,8 +25,9 @@ from data_loader_abc import *
 
 
 
-data_small_folder = Path("/bigdata/scan2cad/complexgen/data/train_small")
-data_root = Path("/bigdata/scan2cad/complexgen/data")
+data_small_folder = Path("/mnt/mlssd2/scan2cad/complexgen/data/train_small")
+data_root = Path("/mnt/mlssd2/scan2cad/complexgen/data")
+experiment_root = Path("/mnt/mlssd2/scan2cad/complexgen/experiments")
   
 if(os.path.exists("/blob")):
   #for Philly training
@@ -2570,37 +2569,19 @@ def reduce_dict(input_dict, average=True):
         reduced_dict = {k: v for k, v in zip(names, values)}
     return reduced_dict
 
-def tf_summary_from_dict(loss_dict, is_training):  
-  if(is_training):
-    summary_name = "train_summary"
-  else:
-    summary_name = "test_summary"
-  #create summary
-  summary_list = []
-  for item in loss_dict:
-    summary_item = tf.compat.v1.Summary.Value(tag=summary_name + "/" + item, simple_value=loss_dict[item])
-    summary_list.append(summary_item)
-  return summary_list#tf.summary.merge(summary_list)
-
 def save_on_master(*args, **kwargs):
     torch.save(*args, **kwargs)
 
 def prepare_experiment_folders(exp_name):
   #prepare folders to write files
-  if(not os.path.exists("experiments")): os.mkdir("experiments")
-  experiment_dir = os.path.join("experiments", exp_name)
-  if(not os.path.exists(experiment_dir)): os.mkdir(experiment_dir)
-  log_dir = os.path.join(experiment_dir, "log")
-  if(not os.path.exists(log_dir)): os.mkdir(log_dir)
-  log_dir = os.path.join(log_dir, exp_name)
-  if(not os.path.exists(log_dir)): os.mkdir(log_dir)
-
-  obj_dir = os.path.join(experiment_dir, "obj")
-  if(not os.path.exists(obj_dir)): os.mkdir(obj_dir)
-
-  checkpoint_dir = os.path.join(experiment_dir, "ckpt")
-  if(not os.path.exists(checkpoint_dir)): os.mkdir(checkpoint_dir)
-  
+  experiment_root.mkdir(exist_ok=True, parents=True)
+  experiment_dir = experiment_root / exp_name
+  log_dir = experiment_dir / "log" / exp_name
+  log_dir.mkdir(exist_ok=True, parents=True)
+  obj_dir = experiment_dir / "obj"
+  obj_dir.mkdir(exist_ok=True, parents=True)
+  checkpoint_dir = experiment_dir / "ckpt"
+  checkpoint_dir.mkdir(exist_ok=True, parents=True)
   return log_dir, obj_dir, checkpoint_dir
 
 class BackBoneWrapper(nn.Module):
@@ -2699,8 +2680,8 @@ def model_evaluation(model_shape, corner_loss_criterion, curve_loss_criterion, p
   #test_data = train_data_loader(1, voxel_dim=voxel_dim, device=device, feature_type=args.input_feature_type, pad1s=not args.backbone_feature_encode, data_folder="test_data")
   data_loader_iterator = iter(train_data)
   
-  obj_dir = os.path.join("experiments", args.experiment_name, test_folder)
-  if(not os.path.exists(obj_dir)): os.mkdir(obj_dir)
+  obj_dir = experiment_root / args.experiment_name / test_folder
+  obj_dir.mkdir(exist_ok=True, parents=True)
   
   test_statistics = []
   sample_name_list = []
@@ -3085,13 +3066,14 @@ def model_evaluation_complex(model_shape, corner_loss_criterion, curve_loss_crit
   patch_loss_criterion.eval()
   assert(args.batch_size == 1)
   data_loader_iterator = iter(train_data)
-  obj_dir = os.path.join("experiments", args.experiment_name, "test_obj")
 
   if args.vis_test:
-    obj_dir = os.path.join("experiments", args.experiment_name, "vis_test")
-  if args.vis_train:
-    obj_dir = os.path.join("experiments", args.experiment_name, "vis_train")
-  if(not os.path.exists(obj_dir)): os.mkdir(obj_dir)
+    obj_dir = experiment_root / args.experiment_name / "vis_test"
+  elif args.vis_train:
+    obj_dir = experiment_root / args.experiment_name / "vis_train"
+  else:
+    obj_dir = experiment_root / args.experiment_name / "test_obj"
+  obj_dir.mkdir(exist_ok=True, parents=True)
   
   test_statistics = []
   sample_name_list = []
@@ -3378,13 +3360,14 @@ def model_evaluation_json(model_shape, corner_loss_criterion, curve_loss_criteri
   patch_loss_criterion.eval()
   assert(args.batch_size == 1)
   data_loader_iterator = iter(train_data)
-  obj_dir = os.path.join("experiments", args.experiment_name, args.folder)
   if args.vis_test:
-    obj_dir = os.path.join("experiments", args.experiment_name, args.folder)
-  if args.vis_train:
-    obj_dir = os.path.join("experiments", args.experiment_name, "vis_train")
-  if(not os.path.exists(obj_dir)): os.mkdir(obj_dir)
-  
+    obj_dir = experiment_root / args.experiment_name, "vis_test"
+  elif args.vis_train:
+    obj_dir = experiment_root / args.experiment_name, "vis_train"
+  else:
+    obj_dir = experiment_root / args.experiment_name, args.folder
+  obj_dir.mkdir(exist_ok=True, parents=True)
+
   test_statistics = []
   sample_name_list = []
   # sample_count = 0
@@ -4096,7 +4079,7 @@ def eval_pipeline(flag_eval = True):
 
   device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
   disable_aux_loss_output = True
-  tf.compat.v1.disable_eager_execution()
+  #tf.compat.v1.disable_eager_execution()
   model_shape, corner_loss_criterion, curve_loss_criterion, patch_loss_criterion = build_unified_model_tripath(device, flag_eval)
   model_without_ddp = model_shape
   param_dicts = [{"params": [p for n, p in model_without_ddp.named_parameters() if p.requires_grad]}]
@@ -4111,8 +4094,7 @@ def eval_pipeline(flag_eval = True):
   if(os.path.exists("default.mtl") and not os.path.exists(os.path.join(obj_dir, "default.mtl"))):
     os.system("cp default.mtl {}".format(obj_dir))
 
-  experiment_dir = os.path.join("experiments", args.experiment_name)
-
+  
   test_folder = 'test_obj'
   if args.evalrest:
     test_folder = 'test_obj_rest'
@@ -4126,6 +4108,7 @@ def eval_pipeline(flag_eval = True):
   if args.vis_inter_layer != -1:
     test_folder = test_folder + '_vislayer{}'.format(args.vis_inter_layer)
 
+  experiment_dir = experiment_root / args.experiment_name
   testobj_dir = os.path.join(experiment_dir, test_folder)
   if(not os.path.exists(testobj_dir)): os.mkdir(testobj_dir)
   if(os.path.exists("default.mtl") and not os.path.exists(os.path.join(testobj_dir, "default.mtl"))):
@@ -4207,7 +4190,7 @@ def pipeline_abc(rank, world_size):
   torch.cuda.set_device(rank)
   device = 'cuda:{}'.format(rank) if torch.cuda.is_available() else 'cpu'
   disable_aux_loss_output = True
-  tf.compat.v1.disable_eager_execution()
+  #tf.compat.v1.disable_eager_execution()
   model_shape, corner_loss_criterion, curve_loss_criterion, patch_loss_criterion = build_unified_model_tripath(device)
   
   model_shape = torch.nn.parallel.DistributedDataParallel(model_shape, device_ids=[rank]) #,find_unused_parameters=True
@@ -4229,7 +4212,6 @@ def pipeline_abc(rank, world_size):
   
   dist.barrier()
   log_dir, obj_dir, checkpoint_dir = prepare_experiment_folders(args.experiment_name)
-  exp_dir = os.path.join("experiments", args.experiment_name)
   
   start_iterations = 0
   if(rank == 0):
@@ -4274,7 +4256,7 @@ def pipeline_abc(rank, world_size):
   if(not running_onCluster and rank == 0): training_range = tqdm(training_range)
 
   if(rank == 0):
-    summary_writer = tf.compat.v1.summary.FileWriter(log_dir)
+    summary_writer = SummaryWriter(log_dir)
     print("Start Training")  
     print("train data size {}".format(len(train_data)))
   data_loader_iterator = iter(train_data)
@@ -4479,11 +4461,14 @@ def pipeline_abc(rank, world_size):
           now = datetime.now()
           print("{} iteration:{}".format(now, train_iter))
           print(summary_loss_dict_reduced)
-          train_summary = tf_summary_from_dict(summary_loss_dict_reduced, True)
-          summary_writer.add_summary(tf.compat.v1.Summary(value=train_summary), train_iter)
+#          train_summary = tf_summary_from_dict(summary_loss_dict_reduced, True)
+#          summary_writer.add_summary(tf.compat.v1.Summary(value=train_summary), train_iter)
+          summary_writer.add_scalars('train', summary_loss_dict_reduced, train_iter)
+
         elif not running_onCluster:
-          train_summary = tf_summary_from_dict(summary_loss_dict_reduced, True)
-          summary_writer.add_summary(tf.compat.v1.Summary(value=train_summary), train_iter)
+          # train_summary = tf_summary_from_dict(summary_loss_dict_reduced, True)
+          # summary_writer.add_summary(tf.compat.v1.Summary(value=train_summary), train_iter)
+          summary_writer.add_scalars('train', summary_loss_dict_reduced, train_iter)
         if train_iter % 600 == 0:
           summary_writer.flush()
 
@@ -4566,9 +4551,10 @@ def pipeline_abc(rank, world_size):
         val_summary_loss_dict = get_val_summary_dict(model_shape, corner_loss_criterion, curve_loss_criterion, patch_loss_criterion, val_data, device, 0, summary_loss_dict)
         val_summary_loss_dict_reduced = reduce_dict(val_summary_loss_dict)
         if rank == 0:
-          test_summary = tf_summary_from_dict(val_summary_loss_dict_reduced, False) 
-          summary_writer.add_summary(tf.compat.v1.Summary(value=test_summary), train_iter)
-          summary_writer.flush()
+          #test_summary = tf_summary_from_dict(val_summary_loss_dict_reduced, False) 
+          #summary_writer.add_summary(tf.compat.v1.Summary(value=test_summary), train_iter)
+          #summary_writer.flush()
+          summary_writer.add_scalars('val', val_summary_loss_dict_reduced, train_iter)
 
 def model_evaluation_nogt(model_shape, data, device, train_iter, flag_output = True, test_folder = 'test_obj'):
   disable_aux_loss_output = True
@@ -4576,9 +4562,9 @@ def model_evaluation_nogt(model_shape, data, device, train_iter, flag_output = T
   assert(args.batch_size == 1)
   data_loader_iterator = iter(data)
   
-  obj_dir = os.path.join("experiments", args.experiment_name, test_folder)
-  os.makedirs(obj_dir, exist_ok=True)
-  
+  obj_dir = experiment_root / args.experiment_name / test_folder
+  obj_dir.mkdir(parents=True, exist_ok=True)
+
   test_statistics = []
   sample_name_list = []
   
@@ -4743,7 +4729,7 @@ def test_nogt():
       
   device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
   disable_aux_loss_output = True
-  tf.compat.v1.disable_eager_execution()
+  #tf.compat.v1.disable_eager_execution()
   backbone = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(Sparse_Backbone_Minkowski())
   ############# voxel_pos to position encoding #############
   position_encoding = PositionEmbeddingSine3D(out_voxel_dim, m*2, normalize=True)
@@ -4764,7 +4750,7 @@ def test_nogt():
   if(os.path.exists("default.mtl") and not os.path.exists(os.path.join(obj_dir, "default.mtl"))):
     os.system("cp default.mtl {}".format(obj_dir))
 
-  experiment_dir = os.path.join("experiments", args.experiment_name)
+  experiment_dir = experiment_root / args.experiment_name
 
   test_folder = 'test_obj'
   if args.evalrest:
